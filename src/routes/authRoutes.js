@@ -95,7 +95,6 @@ const loginSchema = z.object({
 router.post('/login', async (req, res, next) => {
   try {
     const body = loginSchema.parse(req.body);
-
     const { data, error } = await supabaseAuth.auth.signInWithPassword({
       email: body.email,
       password: body.password,
@@ -105,6 +104,20 @@ router.post('/login', async (req, res, next) => {
 
     const token = data.session?.access_token;
     const user = data.user;
+
+    // Comprobamos estado de confirmación del email usando el cliente admin
+    try {
+      const { data: adminResp, error: adminErr } = await supabase.auth.admin.getUserById(user.id);
+      const adminUser = adminResp?.user || adminResp;
+      const confirmed = !!(adminUser?.email_confirmed_at || adminUser?.confirmed_at || adminUser?.email_confirmed);
+      if (!confirmed) {
+        // No permitir login si el correo no está verificado
+        return res.status(403).json({ error: 'El correo no está verificado. Revisa tu correo para activarlo.' });
+      }
+    } catch (e) {
+      console.warn('No se pudo verificar estado de email en admin.getUserById:', e?.message || e);
+      // En caso de error al consultar, no bloquear automáticamente; permitimos continuar.
+    }
 
     // Puede existir el usuario en Auth pero no su fila en `profiles` (por fallos previos de RLS,
     // registros interrumpidos, etc). En ese caso, no rompemos el login: creamos el profile.
