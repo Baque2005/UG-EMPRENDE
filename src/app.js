@@ -28,10 +28,19 @@ const __dirname = path.dirname(__filename);
 const staticPath = path.join(__dirname, '..', 'dist');
 app.use(express.static(staticPath));
 
-const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
+// Leer orígenes desde env y normalizar (quitar slash final)
+const rawOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+
+const normalize = (u) => (typeof u === 'string' ? u.replace(/\/+$/u, '') : u);
+const allowedOrigins = rawOrigins.map(normalize);
+
+/* eslint-disable no-console */
+console.log('CORS_ORIGIN env:', process.env.CORS_ORIGIN);
+console.log('allowedOrigins (normalized):', allowedOrigins);
+/* eslint-enable no-console */
 
 app.use(helmet());
 app.use(morgan('dev'));
@@ -39,7 +48,8 @@ app.use(
   cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true); // postman/curl
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      const normalizedOrigin = normalize(origin);
+      if (allowedOrigins.includes(normalizedOrigin)) return callback(null, true);
       return callback(new Error(`CORS bloqueado para origen: ${origin}`));
     },
     credentials: true,
