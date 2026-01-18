@@ -52,11 +52,15 @@ router.post('/register', async (req, res, next) => {
   try {
     const body = registerSchema.parse(req.body);
 
-    // 1) Crear usuario en Supabase Auth
-    const { data: authData, error: authError } = await supabaseAuth.auth.signUp({
-      email: body.email,
-      password: body.password,
-    });
+    // 1) Crear usuario en Supabase Auth (Supabase enviará el email de confirmación si está habilitado)
+    const { data: authData, error: authError } = await supabaseAuth.auth.signUp(
+      {
+        email: body.email,
+        password: body.password,
+      },
+      // Opcional: redirigir después de la confirmación. Definir SUPABASE_EMAIL_REDIRECT en .env
+      process.env.SUPABASE_EMAIL_REDIRECT ? { emailRedirectTo: process.env.SUPABASE_EMAIL_REDIRECT } : undefined,
+    );
 
     if (authError) {
       const msg = String(authError.message || 'Error al registrar').toLowerCase();
@@ -143,6 +147,9 @@ router.post('/register', async (req, res, next) => {
   }
 });
 
+// Nota: la verificación de email se maneja mediante Supabase (confirmación por link).
+// Los endpoints de verificación por código y reenvío se han eliminado para usar la funcionalidad nativa de Supabase.
+
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
@@ -195,6 +202,20 @@ router.post('/login', async (req, res, next) => {
       ensuredProfile = created;
     }
 
+    // Sincronizar campo `email_verified` en `profiles` según el estado en Supabase Auth
+    try {
+      // Usamos el cliente admin (service role) `supabase` para consultar el usuario
+      const { data: adminResp, error: adminErr } = await supabase.auth.admin.getUserById(user.id);
+      const adminUser = adminResp?.user || adminResp;
+      const confirmed = !!(adminUser?.email_confirmed_at || adminUser?.confirmed_at || adminUser?.email_confirmed);
+      if (confirmed && !ensuredProfile.email_verified) {
+        const { error: updVerifiedErr } = await supabase.from('profiles').update({ email_verified: true }).eq('id', user.id);
+        if (!updVerifiedErr) ensuredProfile.email_verified = true;
+      }
+    } catch (e) {
+      console.warn('No se pudo sincronizar email_verified:', e?.message || e);
+    }
+
     return res.json({
       token,
       user: { id: user.id, email: user.email },
@@ -207,6 +228,28 @@ router.post('/login', async (req, res, next) => {
         faculty: ensuredProfile.faculty,
       },
     });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// Reenviar link de confirmación (magic link) usando Supabase
+const resendConfirmSchema = z.object({ email: z.string().email() });
+router.post('/resend-confirmation', async (req, res, next) => {
+  try {
+    const { email } = resendConfirmSchema.parse(req.body);
+
+    // Usamos el cliente de auth (anon o service role según configuración)
+    const options = process.env.SUPABASE_EMAIL_REDIRECT ? { redirectTo: process.env.SUPABASE_EMAIL_REDIRECT } : undefined;
+    const { data, error } = await supabaseAuth.auth.signInWithOtp({ email }, options);
+
+    // No revelamos si el email existe o no por seguridad
+    if (error) {
+      // Algunos errores pueden indicar falta de configuración; los devolvemos para debugging
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json({ ok: true, message: 'Se ha enviado un link de acceso/confirmación si el email existe.' });
   } catch (err) {
     return next(err);
   }
