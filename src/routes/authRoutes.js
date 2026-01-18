@@ -75,73 +75,10 @@ router.post('/register', async (req, res, next) => {
     if (!authData?.user) return res.status(500).json({ error: 'No se pudo crear el usuario' });
 
     const userId = authData.user.id;
-
-    // 2) Crear perfil
-    const { error: profileError } = await supabase.from('profiles').insert([
-      {
-        id: userId,
-        name: body.name,
-        email: body.email,
-        phone: body.phone,
-        faculty: body.faculty,
-        role: body.role,
-      },
-    ]);
-
-    if (profileError) return res.status(400).json({ error: profileError.message });
-
-    // Notificar admins: nuevo usuario
-    await notifyAdmins({
-      title: 'Nuevo usuario registrado',
-      message: `${body.name} (${body.email}) se registró como ${body.role}.`,
-      meta: { kind: 'user', action: 'created', userId },
-    });
-
-    // 3) Si es emprendedor y mandó negocio, se crea negocio y se vincula al perfil
-    if (body.role === 'entrepreneur' && body.business) {
-      const { data: bizData, error: bizError } = await supabase
-        .from('businesses')
-        .insert([
-          {
-            owner_id: userId,
-            name: body.business.name,
-            description: body.business.description,
-            category: body.business.category,
-            phone: body.business.phone || body.phone,
-            email: body.business.email || body.email,
-            instagram: body.business.instagram,
-            logo_url: body.business.logo || null,
-            banner_url: body.business.banner || null,
-          },
-        ])
-        .select()
-        .single();
-
-      if (bizError) return res.status(400).json({ error: bizError.message });
-
-      const { error: linkError } = await supabase
-        .from('profiles')
-        .update({ business_id: bizData.id })
-        .eq('id', userId);
-
-      if (linkError) return res.status(400).json({ error: linkError.message });
-
-      // Notificar admins: nuevo negocio creado en el registro
-      await notifyAdmins({
-        title: 'Nuevo negocio registrado',
-        message: `Se creó el negocio "${body.business.name}" por ${body.email}.`,
-        meta: { kind: 'business', action: 'created', businessId: bizData.id, ownerUserId: userId },
-      });
-    }
-
-    // Puede que no haya sesión si Supabase requiere confirmación por email
-    const token = authData.session?.access_token || null;
-
-    return res.status(201).json({
-      message: 'Usuario registrado',
-      token,
-      user: { id: userId, email: body.email },
-    });
+    // No creamos perfil ni negocio todavía: la cuenta será activada al confirmar por email.
+    // Devolvemos el id del usuario para referencia. El frontend redirige al login y el usuario
+    // deberá confirmar el correo desde su bandeja para poder iniciar sesión.
+    return res.status(201).json({ message: 'Usuario registrado. Revisa tu correo para confirmar.', user: { id: userId, email: body.email } });
   } catch (err) {
     return next(err);
   }
