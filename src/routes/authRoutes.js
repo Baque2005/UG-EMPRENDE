@@ -255,6 +255,153 @@ router.post('/resend-confirmation', async (req, res, next) => {
   }
 });
 
+// Enviar link de verificación durante el registro (redirige de vuelta a la página de registro)
+const sendVerifySchema = z.object({ email: z.string().email() });
+router.post('/send-verification', async (req, res, next) => {
+  try {
+    const { email } = sendVerifySchema.parse(req.body);
+
+    const redirectTo = process.env.SUPABASE_EMAIL_REDIRECT_REGISTER || process.env.SUPABASE_EMAIL_REDIRECT;
+    const options = redirectTo ? { redirectTo } : undefined;
+
+    const { data, error } = await supabaseAuth.auth.signInWithOtp({ email }, options);
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json({ ok: true, message: 'Se ha enviado el enlace de verificación si el email existe.' });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// Verificar token (usado al regresar desde el link de Supabase)
+const verifyTokenSchema = z.object({ access_token: z.string().min(1) });
+router.post('/verify-token', async (req, res, next) => {
+  try {
+    const { access_token } = verifyTokenSchema.parse(req.body);
+
+    // Usamos el cliente de auth para obtener el usuario asociado al token
+    const { data, error } = await supabaseAuth.auth.getUser(access_token);
+    if (error) return res.status(400).json({ error: error.message });
+
+    const user = data?.user || data;
+    const confirmed = !!(user?.email_confirmed_at || user?.confirmed_at || user?.email_confirmed);
+
+    return res.json({ ok: true, id: user?.id || null, email: user?.email || null, confirmed });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// Completar registro para usuarios ya creados/confirmados por magic link
+const completeRegistrationSchema = z.object({
+  userId: z.string().min(1),
+  name: z.string().min(1),
+  email: z.string().email(),
+  password: z.string().min(6),
+  role: z.enum(['customer', 'entrepreneur', 'admin']).default('customer'),
+  phone: z.string().optional().default(''),
+  faculty: z.string().optional().default(''),
+  business: z
+    .object({
+      name: z.string().min(1),
+      description: z.string().optional().default(''),
+      category: z.string().min(1),
+      instagram: z.string().optional().default(''),
+      phone: z.string().optional().default(''),
+      email: z.string().email().optional(),
+      logo: z.string().optional(),
+      banner: z.string().optional(),
+    })
+    .optional(),
+});
+
+router.post('/complete-registration', async (req, res, next) => {
+  try {
+    const body = completeRegistrationSchema.parse(req.body);
+
+    // 1) Establecer contraseña para el usuario en Auth (admin)
+    const { error: updateErr } = await supabase.auth.admin.updateUserById(body.userId, {
+      password: body.password,
+    });
+    if (updateErr) return res.status(400).json({ error: updateErr.message });
+
+    // 2) Crear o actualizar perfil con el mismo id
+    const profilePayload = {
+      id: body.userId,
+      name: body.name,
+      email: body.email,
+      phone: body.phone,
+      faculty: body.faculty,
+      role: body.role,
+    };
+
+    const { data: existing, error: existingErr } = await supabase.from('profiles').select('id').eq('id', body.userId).maybeSingle();
+    if (existingErr) return res.status(400).json({ error: existingErr.message });
+
+    if (existing) {
+      const { error: updErr } = await supabase.from('profiles').update(profilePayload).eq('id', body.userId);
+      if (updErr) return res.status(400).json({ error: updErr.message });
+    } else {
+      const { error: insErr } = await supabase.from('profiles').insert([profilePayload]);
+      if (insErr) return res.status(400).json({ error: insErr.message });
+    }
+
+    // 3) Si es emprendedor y mandó negocio, crear negocio y vincular
+    if (body.role === 'entrepreneur' && body.business) {
+      const { data: bizData, error: bizError } = await supabase
+        .from('businesses')
+        .insert([
+          {
+            owner_id: body.userId,
+            name: body.business.name,
+            description: body.business.description,
+            category: body.business.category,
+            phone: body.business.phone || body.phone,
+            email: body.business.email || body.email,
+            instagram: body.business.instagram,
+            logo_url: body.business.logo || null,
+            banner_url: body.business.banner || null,
+          },
+        ])
+        .select()
+        .single();
+
+      if (bizError) return res.status(400).json({ error: bizError.message });
+
+      const { error: linkError } = await supabase.from('profiles').update({ business_id: bizData.id }).eq('id', body.userId);
+      if (linkError) return res.status(400).json({ error: linkError.message });
+
+      await notifyAdmins({
+        title: 'Nuevo negocio registrado (completado)',
+        message: `Se creó el negocio "${body.business.name}" por ${body.email}.`,
+        meta: { kind: 'business', action: 'created', businessId: bizData.id, ownerUserId: body.userId },
+      });
+    }
+
+    // 4) Iniciar sesión para devolver token al frontend
+    const { data: signData, error: signErr } = await supabaseAuth.auth.signInWithPassword({
+      email: body.email,
+      password: body.password,
+    });
+    if (signErr) return res.status(400).json({ error: signErr.message });
+
+    const token = signData.session?.access_token || null;
+
+    await notifyAdmins({
+      title: 'Usuario completó registro',
+      message: `${body.name} (${body.email}) completó el registro.`,
+      meta: { kind: 'user', action: 'completed_registration', userId: body.userId },
+    });
+
+    return res.status(201).json({ message: 'Registro completado', token, user: { id: body.userId, email: body.email } });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 router.get('/me', requireAuth, async (req, res, next) => {
   try {
     // Usamos select('*') para tolerar columnas nuevas (p.ej. address, birth_date)
