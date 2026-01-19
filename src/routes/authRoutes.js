@@ -54,12 +54,13 @@ router.post('/register', async (req, res, next) => {
 
     // 1) Crear usuario en Supabase Auth (Supabase enviará el email de confirmación si está habilitado)
 
+    const redirectRegister = process.env.SUPABASE_EMAIL_REDIRECT_REGISTER || process.env.SUPABASE_EMAIL_REDIRECT;
     const { data: authData, error: authError } = await supabaseAuth.auth.signUp(
       {
         email: body.email,
         password: body.password,
       },
-      process.env.SUPABASE_EMAIL_REDIRECT ? { emailRedirectTo: process.env.SUPABASE_EMAIL_REDIRECT } : undefined,
+      redirectRegister ? { emailRedirectTo: redirectRegister } : undefined,
     );
 
     // LOG TEMPORAL: imprimir resultado de signUp
