@@ -81,10 +81,34 @@ router.post('/register', async (req, res, next) => {
     if (!authData?.user) return res.status(500).json({ error: 'No se pudo crear el usuario' });
 
     const userId = authData.user.id;
-    // No creamos perfil ni negocio todavía: la cuenta será activada al confirmar por email.
-    // Devolvemos el id del usuario para referencia. El frontend redirige al login y el usuario
-    // deberá confirmar el correo desde su bandeja para poder iniciar sesión.
-    return res.status(201).json({ message: 'Usuario registrado. Revisa tu correo para confirmar.', user: { id: userId, email: body.email } });
+      // Crear o actualizar perfil con los datos proporcionados en el formulario.
+      try {
+        const profilePayload = {
+          id: userId,
+          name: body.name,
+          email: body.email,
+          phone: body.phone || '',
+          faculty: body.faculty || '',
+          role: body.role || 'customer',
+        };
+
+        // Upsert para no duplicar si ya existe
+        const { data: profileData, error: profileError } = await supabase
+          .from('profiles')
+          .upsert([profilePayload], { onConflict: 'id' })
+          .select()
+          .maybeSingle();
+
+        if (profileError) {
+          console.warn('No se pudo crear/actualizar el profile tras registro:', profileError.message || profileError);
+        }
+      } catch (e) {
+        console.warn('Error al insertar profile tras signUp:', e?.message || e);
+      }
+
+      // Devolvemos el id del usuario para referencia. El frontend redirige al login y el usuario
+      // deberá confirmar el correo desde su bandeja para poder iniciar sesión.
+      return res.status(201).json({ message: 'Usuario registrado. Revisa tu correo para confirmar.', user: { id: userId, email: body.email } });
   } catch (err) {
     return next(err);
   }
