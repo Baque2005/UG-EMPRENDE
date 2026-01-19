@@ -232,6 +232,60 @@ router.post('/send-verification', async (req, res, next) => {
   }
 });
 
+// Enviar enlace de recuperación de contraseña (o magic link si reset no está disponible)
+const passwordResetSchema = z.object({ email: z.string().email() });
+router.post('/send-password-reset', async (req, res, next) => {
+  try {
+    const { email } = passwordResetSchema.parse(req.body);
+
+    const redirectTo = process.env.SUPABASE_EMAIL_REDIRECT_PASSWORD || process.env.SUPABASE_EMAIL_REDIRECT;
+    const options = redirectTo ? { redirectTo } : undefined;
+
+    // Intentar usar la API de resetPasswordForEmail si está disponible
+    try {
+      if (typeof supabaseAuth.auth.resetPasswordForEmail === 'function') {
+        const { data, error } = await supabaseAuth.auth.resetPasswordForEmail(email, options);
+        if (error) return res.status(400).json({ error: error.message });
+        return res.json({ ok: true, message: 'Se ha enviado el correo de recuperación si el email existe.' });
+      }
+    } catch (e) {
+      // continúa al fallback
+      console.warn('resetPasswordForEmail no disponible o falló, usando fallback:', e?.message || e);
+    }
+
+    // Fallback: enviar magic link (signInWithOtp) como alternativa
+    const { data, error } = await supabaseAuth.auth.signInWithOtp({ email }, options);
+    if (error) return res.status(400).json({ error: error.message });
+
+    return res.json({ ok: true, message: 'Se ha enviado un link de acceso/recuperación si el email existe.' });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// Reset de contraseña: recibe access_token y nueva contraseña, valida token y actualiza contraseña con service role
+const resetPasswordSchema = z.object({ access_token: z.string().min(1), password: z.string().min(6) });
+router.post('/reset-password', async (req, res, next) => {
+  try {
+    const { access_token, password } = resetPasswordSchema.parse(req.body);
+
+    // Validar token y obtener usuario
+    const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(access_token);
+    if (userErr) return res.status(400).json({ error: userErr.message });
+
+    const user = userData?.user || userData;
+    if (!user || !user.id) return res.status(400).json({ error: 'Token inválido' });
+
+    // Actualizar contraseña usando service role (admin)
+    const { error: updErr } = await supabase.auth.admin.updateUserById(user.id, { password });
+    if (updErr) return res.status(400).json({ error: updErr.message });
+
+    return res.json({ ok: true, message: 'Contraseña actualizada correctamente.' });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // Verificar token (usado al regresar desde el link de Supabase)
 const verifyTokenSchema = z.object({ access_token: z.string().min(1) });
 router.post('/verify-token', async (req, res, next) => {

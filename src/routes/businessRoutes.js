@@ -29,9 +29,38 @@ router.get('/', async (req, res, next) => {
   try {
     const { data, error } = await supabase
       .from('businesses')
-      .select('id, name, description, category, logo_url, banner_url, phone, email, instagram, rating, total_sales, joined_date');
+      .select('id, name, description, category, logo_url, banner_url, phone, email, instagram, rating, total_sales, joined_date, owner_id');
 
     if (error) return res.status(400).json({ error: error.message });
+    // Attempt to include the owner's default delivery address (if any)
+    try {
+      const ownerIds = Array.from(new Set((data || []).map((b) => b.owner_id).filter(Boolean)));
+      if (ownerIds.length > 0) {
+        const { data: addresses } = await supabase
+          .from('delivery_addresses')
+          .select('user_id, label, address, city, phone')
+          .in('user_id', ownerIds)
+          .eq('is_default', true);
+
+        const addrMap = (addresses || []).reduce((acc, a) => {
+          acc[a.user_id] = a;
+          return acc;
+        }, {});
+
+        const enriched = (data || []).map((b) => ({
+          ...b,
+          address: addrMap[b.owner_id]?.address ?? null,
+          addressLabel: addrMap[b.owner_id]?.label ?? null,
+          addressCity: addrMap[b.owner_id]?.city ?? null,
+          addressPhone: addrMap[b.owner_id]?.phone ?? null,
+        }));
+
+        return res.json(enriched);
+      }
+    } catch (e) {
+      // ignore address enrichment failures
+    }
+
     return res.json(data);
   } catch (err) {
     return next(err);
@@ -49,6 +78,28 @@ router.get('/:id', async (req, res, next) => {
       .single();
 
     if (error) return res.status(404).json({ error: 'Negocio no encontrado' });
+
+    // Attach owner's default delivery address if available
+    try {
+      if (business?.owner_id) {
+        const { data: addr } = await supabase
+          .from('delivery_addresses')
+          .select('label, address, city, phone')
+          .eq('user_id', business.owner_id)
+          .eq('is_default', true)
+          .limit(1)
+          .maybeSingle();
+
+        if (addr) {
+          business.address = addr.address;
+          business.addressLabel = addr.label;
+          business.addressCity = addr.city;
+          business.addressPhone = addr.phone;
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
 
     const { data: products } = await supabase
       .from('products')
