@@ -53,14 +53,20 @@ router.post('/register', async (req, res, next) => {
     const body = registerSchema.parse(req.body);
 
     // 1) Crear usuario en Supabase Auth (Supabase enviará el email de confirmación si está habilitado)
+
     const { data: authData, error: authError } = await supabaseAuth.auth.signUp(
       {
         email: body.email,
         password: body.password,
       },
-      // Opcional: redirigir después de la confirmación. Definir SUPABASE_EMAIL_REDIRECT en .env
       process.env.SUPABASE_EMAIL_REDIRECT ? { emailRedirectTo: process.env.SUPABASE_EMAIL_REDIRECT } : undefined,
     );
+
+    // LOG TEMPORAL: imprimir resultado de signUp
+    console.log('=== [REGISTER] Resultado signUp ===');
+    console.log('authData:', JSON.stringify(authData));
+    console.log('authError:', authError);
+    console.log('===================================');
 
     if (authError) {
       const msg = String(authError.message || 'Error al registrar').toLowerCase();
