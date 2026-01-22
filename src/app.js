@@ -44,7 +44,38 @@ console.log('CORS_ORIGIN env:', process.env.CORS_ORIGIN);
 console.log('allowedOrigins (normalized):', allowedOrigins);
 /* eslint-enable no-console */
 
-app.use(helmet());
+// Helmet con CSP personalizada: permitir imágenes desde el dominio del proyecto y Unsplash
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:', 'https://sgidgdgdqqkzcobshbsg.supabase.co', 'https://images.unsplash.com'],
+        mediaSrc: ["'self'", 'data:', 'https://sgidgdgdqqkzcobshbsg.supabase.co'],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        connectSrc: ["'self'", 'https://sgidgdgdqqkzcobshbsg.supabase.co'],
+      },
+    },
+  }),
+);
+
+// Forzar CSP explícita en la respuesta usando la URL de Supabase desde .env.
+// Esto ayuda si algún proxy/cache elimina o no aplica las cabeceras de Helmet.
+const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/+$/u, '');
+const forcedCsp = [
+  "default-src 'self'",
+  `img-src 'self' data: ${supabaseUrl} https://images.unsplash.com`,
+  `media-src 'self' data: ${supabaseUrl}`,
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  `connect-src 'self' ${supabaseUrl}`,
+].join('; ');
+
+app.use((req, res, next) => {
+  if (forcedCsp) res.setHeader('Content-Security-Policy', forcedCsp);
+  next();
+});
 app.use(morgan('dev'));
 app.use(
   cors({
