@@ -550,14 +550,43 @@ router.patch('/me', requireAuth, async (req, res, next) => {
 
 router.delete('/me', requireAuth, async (req, res, next) => {
   try {
-    // Limpieza best-effort de datos ligados al usuario (no tocamos negocios/productos)
-    await Promise.allSettled([
-      supabase.from('notifications').delete().eq('user_id', req.user.id),
-      supabase.from('payment_methods').delete().eq('user_id', req.user.id),
-      supabase.from('delivery_addresses').delete().eq('user_id', req.user.id),
-      supabase.from('user_settings').delete().eq('user_id', req.user.id),
-    ]);
+    // Limpieza best-effort de datos ligados al usuario.
+    // Eliminamos datos en varias tablas relacionadas. No tocamos productos/negocios por seguridad.
+    try {
+      await Promise.allSettled([
+        supabase.from('notifications').delete().eq('user_id', req.user.id),
+        supabase.from('payment_methods').delete().eq('user_id', req.user.id),
+        supabase.from('delivery_addresses').delete().eq('user_id', req.user.id),
+        supabase.from('user_settings').delete().eq('user_id', req.user.id),
+        supabase.from('favorites').delete().eq('user_id', req.user.id),
+        supabase.from('push_subscriptions').delete().eq('user_id', req.user.id),
+        supabase.from('notifications').delete().eq('user_id', req.user.id),
+        supabase.from('reports').delete().or(`reporter_id.eq.${req.user.id},owner_user_id.eq.${req.user.id}`),
+      ]);
+    } catch (e) {
+      // ignore best-effort errors
+    }
 
+    // Orders and order_items: eliminar primero items asociados a las órdenes del usuario
+    try {
+      const { data: userOrders, error: ordersErr } = await supabase.from('orders').select('id').eq('customer_id', req.user.id);
+      if (!ordersErr && Array.isArray(userOrders) && userOrders.length > 0) {
+        const ids = userOrders.map((o) => o.id);
+        await supabase.from('order_items').delete().in('order_id', ids);
+        await supabase.from('orders').delete().in('id', ids);
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    // Borrar perfil del usuario (fila en profiles)
+    try {
+      await supabase.from('profiles').delete().eq('id', req.user.id);
+    } catch (e) {
+      // ignore
+    }
+
+    // Finalmente, eliminar el usuario de Auth (Supabase)
     const { error } = await supabase.auth.admin.deleteUser(req.user.id);
     if (error) return res.status(400).json({ error: error.message });
 

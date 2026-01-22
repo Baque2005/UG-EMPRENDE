@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { supabase } from '../config/supabase.js';
+import { createNotification } from '../utils/createNotification.js';
 import { requireAuth, requireRole } from '../middlewares/auth.js';
+
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 const router = Router();
 
@@ -98,7 +101,7 @@ router.post('/', requireAuth, async (req, res, next) => {
           user_id: biz.owner_id,
           title: 'Nuevo pedido recibido',
           message: `Tienes un nuevo pedido pendiente${biz?.name ? ` en ${biz.name}` : ''}.`,
-          meta: { kind: 'order', action: 'new', orderId: order.id, businessId },
+          meta: { kind: 'order', action: 'new', orderId: order.id, businessId, url: `${FRONTEND_URL}/dashboard?tab=orders`, ctaLabel: 'Ver pedidos' },
         });
       }
 
@@ -106,11 +109,17 @@ router.post('/', requireAuth, async (req, res, next) => {
         user_id: req.user.id,
         title: 'Pedido creado',
         message: 'Tu pedido fue creado exitosamente. Puedes verlo en tus pedidos.',
-        meta: { kind: 'order', action: 'created', orderId: order.id, businessId },
+        meta: { kind: 'order', action: 'created', orderId: order.id, businessId, url: `${FRONTEND_URL}/profile?tab=orders`, ctaLabel: 'Ver pedido' },
       });
 
       if (notificationsToInsert.length > 0) {
-        await supabase.from('notifications').insert(notificationsToInsert);
+        for (const n of notificationsToInsert) {
+          try {
+            await createNotification({ userId: n.user_id, title: n.title, message: n.message, meta: n.meta, createdAt: n.created_at });
+          } catch {
+            // best-effort
+          }
+        }
       }
     } catch {
       // silencioso
@@ -215,14 +224,12 @@ router.patch('/:id/status', requireAuth, requireRole(['entrepreneur', 'admin']),
     // Notificar al cliente del cambio de estado (best-effort)
     try {
       if (order?.customer_id) {
-        await supabase.from('notifications').insert([
-          {
-            user_id: order.customer_id,
-            title: 'Estado de tu pedido actualizado',
-            message: `Tu pedido ahora está: ${body.status}`,
-            meta: { kind: 'order', action: 'status', orderId: id, status: body.status },
-          },
-        ]);
+        await createNotification({
+          userId: order.customer_id,
+          title: 'Estado de tu pedido actualizado',
+          message: `Tu pedido ahora está: ${body.status}`,
+          meta: { kind: 'order', action: 'status', orderId: id, status: body.status, url: `${FRONTEND_URL}/profile?tab=orders`, ctaLabel: 'Ver pedido' },
+        });
       }
     } catch {
       // silencioso

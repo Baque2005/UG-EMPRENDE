@@ -8,8 +8,9 @@ const router = Router();
 const createSchema = z.object({
   label: z.string().min(1),
   address: z.string().min(3),
-  city: z.string().min(2),
-  phone: z.string().min(6).optional().default(''),
+  // city puede ser opcional en el perfil; si no se provee, se almacenará NULL/vacío
+    city: z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), z.string().min(2).optional()),
+    phone: z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), z.string().min(6).optional()).default(''),
   isDefault: z.boolean().optional(),
 });
 
@@ -54,8 +55,10 @@ router.post('/me', requireAuth, async (req, res, next) => {
           user_id: req.user.id,
           label: body.label,
           address: body.address,
-          city: body.city,
-          phone: body.phone,
+          // Evitar insertar NULL en columnas que son NOT NULL en la BD.
+          // Si `city` no fue provisto, guardamos cadena vacía.
+          city: body.city !== undefined ? body.city : '',
+          phone: body.phone !== undefined ? body.phone : '',
           is_default: makeDefault,
         },
       ])
@@ -73,8 +76,8 @@ const updateSchema = z
   .object({
     label: z.string().min(1).optional(),
     address: z.string().min(3).optional(),
-    city: z.string().min(2).optional(),
-    phone: z.string().min(6).optional(),
+      city: z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), z.string().min(2).optional()),
+      phone: z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), z.string().min(6).optional()),
     isDefault: z.boolean().optional(),
   })
   .strict();
@@ -127,7 +130,7 @@ router.delete('/me/:id', requireAuth, async (req, res, next) => {
       .delete()
       .eq('id', id)
       .eq('user_id', req.user.id)
-      .select('id, is_default')
+      .select('id, is_default, address, phone')
       .maybeSingle();
 
     if (error) return res.status(400).json({ error: error.message });
@@ -148,6 +151,24 @@ router.delete('/me/:id', requireAuth, async (req, res, next) => {
           .eq('id', nextId)
           .eq('user_id', req.user.id);
       }
+    }
+
+    // Si el profile del usuario apuntaba a esta dirección, limpiamos los campos en profiles
+    try {
+      const { data: profile } = await supabase.from('profiles').select('address, phone').eq('id', req.user.id).maybeSingle();
+      if (profile) {
+        const sameAddress = deleted?.address && profile.address && String(profile.address).trim() === String(deleted.address).trim();
+        const samePhone = deleted?.phone && profile.phone && String(profile.phone).trim() === String(deleted.phone).trim();
+        const patch = {};
+        if (sameAddress) patch.address = '';
+        if (samePhone) patch.phone = '';
+        if (Object.keys(patch).length > 0) {
+          await supabase.from('profiles').update(patch).eq('id', req.user.id);
+        }
+      }
+    } catch (e) {
+      // best-effort: no bloquear el delete si falla la limpieza del profile
+      console.warn('Failed to clear profile address/phone after delivery address delete', e?.message || e);
     }
 
     return res.json({ message: 'Dirección eliminada' });

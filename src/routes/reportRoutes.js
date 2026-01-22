@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { supabase } from '../config/supabase.js';
+import { createNotification } from '../utils/createNotification.js';
 import { requireAuth, requireRole } from '../middlewares/auth.js';
 import { notifyAdmins } from '../utils/notifyAdmins.js';
+
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 const router = Router();
 
@@ -78,35 +81,42 @@ router.post('/', requireAuth, async (req, res, next) => {
     await notifyAdmins({
       title: 'Nuevo reporte recibido',
       message: `Se reportó ${body.type}${body.targetName ? `: ${body.targetName}` : ''}.`,
-      meta: { kind: 'report', action: 'created', reportId: report.id },
+      meta: { kind: 'report', action: 'created', reportId: report.id, url: `${FRONTEND_URL}/admin`, ctaLabel: 'Ver reportes' },
       createdAt: now,
     });
 
     // Notificar dueño
     if (ownerUserId && ownerUserId !== req.user.id) {
-      await supabase.from('notifications').insert([
-        {
-          user_id: ownerUserId,
+      try {
+        let url;
+        if (body.type === 'product') url = `${FRONTEND_URL}/product/${body.targetId}`;
+        else if (body.type === 'business') url = `${FRONTEND_URL}/business/${body.targetId}`;
+        else if (body.type === 'user') url = `${FRONTEND_URL}/profile?user=${body.targetId}`;
+
+        await createNotification({
+          userId: ownerUserId,
           title: 'Se reportó un elemento tuyo',
           message: `${body.targetName ? `"${body.targetName}"` : 'Un elemento'} fue reportado. Razón: ${body.reason}`,
-          meta: { kind: 'report', action: 'received', reportId: report.id },
-          read: false,
-          created_at: now,
-        },
-      ]);
+          meta: { kind: 'report', action: 'received', reportId: report.id, url, ctaLabel: 'Ver elemento' },
+          createdAt: now,
+        });
+      } catch {
+        // best-effort
+      }
     }
 
     // Notificar al que reportó
-    await supabase.from('notifications').insert([
-      {
-        user_id: req.user.id,
+    try {
+      await createNotification({
+        userId: req.user.id,
         title: 'Reporte enviado',
         message: 'Tu reporte fue enviado al administrador.',
         meta: { kind: 'report', action: 'submitted', reportId: report.id },
-        read: false,
-        created_at: now,
-      },
-    ]);
+        createdAt: now,
+      });
+    } catch {
+      // best-effort
+    }
 
     return res.status(201).json({ report });
   } catch (err) {
