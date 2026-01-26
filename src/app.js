@@ -21,6 +21,7 @@ import addressRoutes from './routes/addressRoutes.js';
 import userSettingsRoutes from './routes/userSettingsRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import favoriteRoutes from './routes/favoriteRoutes.js';
+import chatRoutes from './routes/chatRoutes.js';
 
 const app = express();
 
@@ -105,6 +106,7 @@ app.use('/api/payment-methods', paymentMethodRoutes);
 app.use('/api/addresses', addressRoutes);
 app.use('/api/favorites', favoriteRoutes);
 app.use('/api/user-settings', userSettingsRoutes);
+app.use('/api/chat', chatRoutes);
 
 // Fallback para SPA: devolver index.html para rutas que no sean API
 app.use((req, res, next) => {
