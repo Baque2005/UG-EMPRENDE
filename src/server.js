@@ -33,6 +33,12 @@ const lastSeenByUser = new Map(); // userId -> ISO
 const privacyByUser = new Map(); // userId -> { showConnectionStatus, showReadReceipts }
 const chatEmailByUser = new Map(); // userId -> boolean
 
+// Presence watch subscriptions (best-effort, in-memory)
+// socketsWatchingUser: subjectUserId -> Set(socketId)
+const socketsWatchingUser = new Map();
+// watchedUsersBySocket: socketId -> Set(subjectUserId)
+const watchedUsersBySocket = new Map();
+
 function getPrivacy(userId) {
   if (!userId) return { showConnectionStatus: true, showReadReceipts: true };
   const p = privacyByUser.get(userId);
@@ -105,6 +111,53 @@ function makePresencePayload({ viewerUserId, subjectUserId }) {
   };
 }
 
+function addPresenceWatch(socketId, subjectUserId) {
+  if (!socketId || !subjectUserId) return;
+  const sid = String(socketId);
+  const uid = String(subjectUserId);
+  const byUser = socketsWatchingUser.get(uid) || new Set();
+  byUser.add(sid);
+  socketsWatchingUser.set(uid, byUser);
+
+  const bySocket = watchedUsersBySocket.get(sid) || new Set();
+  bySocket.add(uid);
+  watchedUsersBySocket.set(sid, bySocket);
+}
+
+function removeAllPresenceWatchesForSocket(socketId) {
+  if (!socketId) return;
+  const sid = String(socketId);
+  const subjects = watchedUsersBySocket.get(sid);
+  if (subjects) {
+    for (const uid of subjects) {
+      const set = socketsWatchingUser.get(uid);
+      if (!set) continue;
+      set.delete(sid);
+      if (set.size === 0) socketsWatchingUser.delete(uid);
+      else socketsWatchingUser.set(uid, set);
+    }
+  }
+  watchedUsersBySocket.delete(sid);
+}
+
+function notifyPresenceWatchers(subjectUserId) {
+  if (!subjectUserId) return;
+  const uid = String(subjectUserId);
+  const watchers = socketsWatchingUser.get(uid);
+  if (!watchers || watchers.size === 0) return;
+
+  for (const sid of watchers) {
+    try {
+      const s = io.sockets.sockets.get(String(sid));
+      if (!s) continue;
+      const viewerId = s.handshake.query?.userId || null;
+      s.emit('presence:update', makePresencePayload({ viewerUserId: viewerId, subjectUserId: uid }));
+    } catch {
+      // ignore
+    }
+  }
+}
+
 io.on('connection', (socket) => {
   const { orderId, userId, userName } = socket.handshake.query || {};
   const thisUserId = userId || null;
@@ -112,6 +165,9 @@ io.on('connection', (socket) => {
   if (thisUserId) {
     setUserOnline(thisUserId);
     socket.join(`user:${thisUserId}`);
+
+    // Inform watchers that this user is now online
+    notifyPresenceWatchers(thisUserId);
   }
 
   async function resolveRoomId(inputId) {
@@ -124,6 +180,9 @@ io.on('connection', (socket) => {
     try {
       setPrivacy(thisUserId, payload);
 
+      // Inform watchers (global) that visibility may have changed
+      notifyPresenceWatchers(thisUserId);
+
       // Si ya está en una conversación, actualiza la presencia visible/invisible inmediatamente.
       const convoId = socket.data?.conversationId;
       if (!convoId) return;
@@ -132,6 +191,40 @@ io.on('connection', (socket) => {
       for (const s of sockets) {
         const viewerId = s.handshake.query?.userId || null;
         s.emit('presence:update', makePresencePayload({ viewerUserId: viewerId, subjectUserId: thisUserId }));
+      }
+    } catch {
+      // ignore
+    }
+  });
+
+  // Subscribe to presence updates for specific users
+  socket.on('presence:watch', (payload) => {
+    try {
+      if (!thisUserId) return;
+      const raw = payload?.userIds;
+      if (!Array.isArray(raw)) return;
+
+      // Replace subscriptions for this socket
+      removeAllPresenceWatchesForSocket(socket.id);
+
+      const list = Array.from(
+        new Set(
+          raw
+            .map((v) => String(v || '').trim())
+            .filter(Boolean)
+            .slice(0, 200),
+        ),
+      );
+
+      for (const uid of list) {
+        if (uid === String(thisUserId)) continue;
+        addPresenceWatch(socket.id, uid);
+      }
+
+      // Send snapshot immediately
+      for (const uid of list) {
+        if (!uid) continue;
+        socket.emit('presence:update', makePresencePayload({ viewerUserId: thisUserId, subjectUserId: uid }));
       }
     } catch {
       // ignore
@@ -148,6 +241,17 @@ io.on('connection', (socket) => {
     if (!roomId) return;
     try {
       const convoId = await resolveRoomId(roomId);
+
+      // Si ya estaba unido a otra conversación, salir para evitar recibir mensajes duplicados.
+      try {
+        const prevConvo = socket.data?.conversationId;
+        if (prevConvo && String(prevConvo) !== String(convoId)) {
+          socket.leave(`chat:${prevConvo}`);
+        }
+      } catch {
+        // ignore
+      }
+
       socket.join(`chat:${convoId}`);
       socket.data = socket.data || {};
       socket.data.conversationId = convoId;
@@ -178,6 +282,45 @@ io.on('connection', (socket) => {
       }
     } catch (e) {
       socket.join(`chat:${roomId}`);
+    }
+  });
+
+  // Typing indicator (ephemeral)
+  socket.on('typing', async (payload) => {
+    try {
+      if (!thisUserId) return;
+      const convoId = await resolveRoomId(payload?.conversationId || payload?.orderId || orderId);
+      if (!convoId) return;
+
+      const isTyping = Boolean(payload?.isTyping);
+
+      // Determinar destinatario
+      let recipientUserId = null;
+      try {
+        const meta = await resolveConversationMeta(convoId);
+        const customerId = meta?.customerId || null;
+        const ownerId = meta?.businessOwnerUserId || null;
+        if (customerId && ownerId) {
+          recipientUserId = thisUserId === customerId ? ownerId : (thisUserId === ownerId ? customerId : null);
+        }
+      } catch {
+        recipientUserId = null;
+      }
+
+      const evt = {
+        conversationId: convoId,
+        userId: thisUserId,
+        isTyping,
+        at: new Date().toISOString(),
+      };
+
+      // A sockets en la sala (por si el otro está dentro del chat)
+      io.to(`chat:${convoId}`).emit('typing', evt);
+
+      // Y a la room del usuario (por si NO está en la sala)
+      if (recipientUserId) io.to(`user:${recipientUserId}`).emit('typing', evt);
+    } catch {
+      // ignore
     }
   });
 
@@ -231,6 +374,24 @@ io.on('connection', (socket) => {
               url: `/chat?conversationId=${encodeURIComponent(convoId)}`,
               suppressEmail: !chatEmailEnabled,
             },
+          });
+
+          // Enviar preview en tiempo real para actualizar el sidebar sin refrescar.
+          io.to(`user:${recipientUserId}`).emit('chat:preview', {
+            conversationId: convoId,
+            text: msg?.text || '',
+            senderId: sender,
+            createdAt: msg?.created_at || null,
+          });
+        }
+
+        // También al propio sender (multi-dispositivo y para actualizar sidebar si no está en la sala)
+        if (sender) {
+          io.to(`user:${sender}`).emit('chat:preview', {
+            conversationId: convoId,
+            text: msg?.text || '',
+            senderId: sender,
+            createdAt: msg?.created_at || null,
           });
         }
       } catch {
@@ -287,8 +448,14 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', async () => {
+    // Cleanup global watches
+    removeAllPresenceWatchesForSocket(socket.id);
+
     if (!thisUserId) return;
     await setUserOffline(thisUserId);
+
+    // Inform watchers that this user is now offline
+    notifyPresenceWatchers(thisUserId);
     try {
       const convoId = socket.data?.conversationId;
       if (convoId) {
