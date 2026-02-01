@@ -1,5 +1,5 @@
 import express from 'express';
-import { getMessages, addMessage, addImageMessage } from '../chatService.js';
+import { getMessages, addMessage, addImageMessage, getLastMessage } from '../chatService.js';
 import { requireAuth } from '../middlewares/auth.js';
 import { supabase } from '../config/supabase.js';
 import { resolveConversationMeta } from '../chatService.js';
@@ -31,6 +31,46 @@ async function ensureChatAccess(req, chatId) {
   err.status = 403;
   throw err;
 }
+
+// Obtener previews (último mensaje) para múltiples conversaciones (requiere auth)
+// Body: { ids: string[] }
+router.post('/previews', requireAuth, async (req, res) => {
+  try {
+    const idsRaw = req.body?.ids;
+    if (!Array.isArray(idsRaw)) return res.status(400).json({ error: 'ids requerido' });
+
+    const ids = Array.from(
+      new Set(
+        idsRaw
+          .map((v) => String(v || '').trim())
+          .filter(Boolean),
+      ),
+    ).slice(0, 60);
+
+    const previews = {};
+    for (const chatId of ids) {
+      try {
+        await ensureChatAccess(req, chatId);
+        const msg = await getLastMessage(chatId, req.user?.id);
+        if (!msg) continue;
+
+        previews[String(chatId)] = {
+          text: msg?.text || '',
+          senderId: msg?.sender_id || null,
+          createdAt: msg?.created_at || null,
+        };
+      } catch {
+        // Silenciar conversaciones no autorizadas
+      }
+    }
+
+    return res.json({ previews });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('Error getting chat previews', err);
+    return res.status(500).json({ error: 'Error al obtener previews' });
+  }
+});
 
 // Obtener mensajes de un chat (conversationId u orderId) (requiere auth)
 router.get('/:chatId/messages', requireAuth, async (req, res) => {

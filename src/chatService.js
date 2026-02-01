@@ -124,6 +124,55 @@ export const getMessages = async (chatId, viewerId = null) => {
   }
 };
 
+export const getLastMessage = async (chatId, viewerId = null) => {
+  if (!chatId) return null;
+
+  const meta = await resolveConversationMeta(chatId);
+  const convoId = meta.conversationId;
+  if (!convoId) return null;
+
+  let blockedIds = [];
+  if (viewerId) {
+    try {
+      const { data: blocks } = await supabase
+        .from('user_blocks')
+        .select('blocked_id')
+        .eq('blocker_id', viewerId);
+      blockedIds = Array.isArray(blocks) ? blocks.map((b) => String(b.blocked_id)) : [];
+    } catch {
+      blockedIds = [];
+    }
+  }
+
+  let query = supabase
+    .from('messages')
+    .select('*')
+    .order('created_at', { ascending: false })
+    // Best-effort: limitar para no traer historial completo
+    .limit(30);
+
+  // Compat: mostrar mensajes antiguos guardados por orderId (si difiere del conversationId)
+  if (meta.orderId && meta.orderId !== convoId) {
+    query = query.or(`order_id.eq.${meta.orderId},order_id.eq.${convoId}`);
+  } else {
+    query = query.eq('order_id', convoId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    // eslint-disable-next-line no-console
+    console.error('Supabase getLastMessage error', error);
+    return null;
+  }
+
+  const list = Array.isArray(data) ? data : [];
+  if (!viewerId || blockedIds.length === 0) return list[0] || null;
+
+  // Tomar el último mensaje no bloqueado (best-effort dentro del límite)
+  const visible = list.find((m) => !blockedIds.includes(String(m?.sender_id || '')));
+  return visible || null;
+};
+
 export const addMessage = async (chatId, message) => {
   if (!chatId || !message || !message.text) return null;
 
