@@ -75,6 +75,7 @@ export async function createNotification({ userId, title, message, meta, created
         to: profile.email,
         subject,
         kind,
+        provider: mailRes?.provider,
         error: mailRes?.error,
       });
     }
