@@ -47,16 +47,32 @@ console.log('allowedOrigins (normalized):', allowedOrigins);
 /* eslint-enable no-console */
 
 // Helmet con CSP personalizada: permitir imágenes desde el dominio del proyecto y Unsplash
+const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/+$/u, '');
+
+const cspImgSrc = [
+  "'self'",
+  'data:',
+  'blob:',
+  // Supabase Storage (y otros recursos del proyecto)
+  ...(supabaseUrl ? [supabaseUrl] : []),
+  // Activos externos usados por la UI
+  'https://images.unsplash.com',
+  'https://api.dicebear.com',
+  'https://i.postimg.cc',
+];
+
+const cspConnectSrc = ["'self'", ...(supabaseUrl ? [supabaseUrl] : [])];
+
 app.use(
   helmet({
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        imgSrc: ["'self'", 'data:', 'https://sgidgdgdqqkzcobshbsg.supabase.co', 'https://images.unsplash.com'],
-        mediaSrc: ["'self'", 'data:', 'https://sgidgdgdqqkzcobshbsg.supabase.co'],
+        imgSrc: cspImgSrc,
+        mediaSrc: ["'self'", 'data:', ...(supabaseUrl ? [supabaseUrl] : [])],
         scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
-        connectSrc: ["'self'", 'https://sgidgdgdqqkzcobshbsg.supabase.co'],
+        connectSrc: cspConnectSrc,
       },
     },
   }),
@@ -64,14 +80,13 @@ app.use(
 
 // Forzar CSP explícita en la respuesta usando la URL de Supabase desde .env.
 // Esto ayuda si algún proxy/cache elimina o no aplica las cabeceras de Helmet.
-const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/+$/u, '');
 const forcedCsp = [
   "default-src 'self'",
-  `img-src 'self' data: ${supabaseUrl} https://images.unsplash.com`,
-  `media-src 'self' data: ${supabaseUrl}`,
+  `img-src ${cspImgSrc.join(' ')}`,
+  `media-src 'self' data: ${supabaseUrl || ''}`.trim(),
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  `connect-src 'self' ${supabaseUrl}`,
+  `connect-src ${cspConnectSrc.join(' ')}`,
 ].join('; ');
 
 app.use((req, res, next) => {
