@@ -381,6 +381,45 @@ router.patch('/:id', requireAuth, requireRole(['entrepreneur', 'admin']), async 
 router.delete('/:id', requireAuth, requireRole(['admin']), async (req, res, next) => {
   try {
     const { id } = req.params;
+
+    // 1) Eliminar órdenes del negocio (y sus items) para evitar FK orders_business_id_fkey
+    try {
+      const { data: bizOrders, error: bizOrdersErr } = await supabase
+        .from('orders')
+        .select('id')
+        .eq('business_id', id);
+
+      if (!bizOrdersErr && Array.isArray(bizOrders) && bizOrders.length > 0) {
+        const ids = bizOrders.map((o) => o.id);
+        await supabase.from('order_items').delete().in('order_id', ids);
+        await supabase.from('orders').delete().in('id', ids);
+      }
+    } catch {
+      // ignore best-effort
+    }
+
+    // 2) Eliminar productos del negocio
+    try {
+      await supabase.from('products').delete().eq('business_id', id);
+    } catch {
+      // ignore
+    }
+
+    // 3) Eliminar calificaciones del negocio
+    try {
+      await supabase.from('business_ratings').delete().eq('business_id', id);
+    } catch {
+      // ignore
+    }
+
+    // 4) Desvincular perfiles que apunten a este negocio (evita referencias colgantes)
+    try {
+      await supabase.from('profiles').update({ business_id: null }).eq('business_id', id);
+    } catch {
+      // ignore
+    }
+
+    // 5) Finalmente borrar el negocio
     const { error } = await supabase.from('businesses').delete().eq('id', id);
     if (error) return res.status(400).json({ error: error.message });
     return res.json({ message: 'Negocio eliminado' });
