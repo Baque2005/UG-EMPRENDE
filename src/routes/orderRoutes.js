@@ -186,6 +186,50 @@ router.get('/business/:businessId', requireAuth, requireRole(['entrepreneur', 'a
   }
 });
 
+router.get('/:id', requireAuth, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const { data: order, error } = await supabase
+      .from('orders')
+      .select('*, order_items(*)')
+      .eq('id', id)
+      .single();
+
+    if (error || !order) return res.status(404).json({ error: 'Orden no encontrada' });
+
+    const role = String(req.profile?.role || '').toLowerCase();
+    const isAdmin = role === 'admin';
+    const isEntrepreneur = role === 'entrepreneur';
+
+    if (!isAdmin) {
+      // Cliente: puede ver su propia orden
+      if (!isEntrepreneur && String(order.customer_id) === String(req.user.id)) {
+        return res.json({ order });
+      }
+
+      // Emprendedor: puede ver órdenes de su negocio (si es dueño)
+      if (isEntrepreneur && order.business_id) {
+        const { data: biz } = await supabase
+          .from('businesses')
+          .select('id, owner_id')
+          .eq('id', order.business_id)
+          .single();
+
+        if (biz?.owner_id && String(biz.owner_id) === String(req.user.id)) {
+          return res.json({ order });
+        }
+      }
+
+      return res.status(403).json({ error: 'No autorizado' });
+    }
+
+    return res.json({ order });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 const statusSchema = z.object({
   status: z.enum(['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'cancelled']),
 });
@@ -212,14 +256,44 @@ router.patch('/:id/status', requireAuth, requireRole(['entrepreneur', 'admin']),
     const isAdmin = req.profile?.role === 'admin';
     if (!isAdmin && biz?.owner_id !== req.user.id) return res.status(403).json({ error: 'No autorizado' });
 
-    const { data, error } = await supabase
-      .from('orders')
-      .update({ status: body.status })
-      .eq('id', id)
-      .select()
-      .single();
+    const prevStatus = String(order?.status || '').toLowerCase();
+    const nextStatus = String(body.status || '').toLowerCase();
 
-    if (error) return res.status(400).json({ error: error.message });
+    const patch = { status: body.status };
+    // Guardar fecha exacta de entrega/emisión de factura cuando pasa a "delivered" por primera vez.
+    // Si la columna no existe en BD aún, hacemos fallback sin romper el endpoint.
+    if (prevStatus !== 'delivered' && nextStatus === 'delivered') {
+      patch.delivered_at = new Date().toISOString();
+    }
+
+    let updatedOrder;
+    {
+      const { data, error } = await supabase
+        .from('orders')
+        .update(patch)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) {
+        // Fallback si delivered_at no existe (o no se puede setear por permisos).
+        if (patch.delivered_at) {
+          const { data: data2, error: error2 } = await supabase
+            .from('orders')
+            .update({ status: body.status })
+            .eq('id', id)
+            .select()
+            .single();
+
+          if (error2) return res.status(400).json({ error: error2.message });
+          updatedOrder = data2;
+        } else {
+          return res.status(400).json({ error: error.message });
+        }
+      } else {
+        updatedOrder = data;
+      }
+    }
 
     // Notificar al cliente del cambio de estado (best-effort)
     try {
@@ -237,9 +311,6 @@ router.patch('/:id/status', requireAuth, requireRole(['entrepreneur', 'admin']),
 
     // Incrementar ventas del negocio cuando el pedido se entrega por primera vez (best-effort)
     try {
-      const prevStatus = String(order?.status || '').toLowerCase();
-      const nextStatus = String(body.status || '').toLowerCase();
-
       if (prevStatus !== 'delivered' && nextStatus === 'delivered' && order?.business_id) {
         const { data: biz } = await supabase
           .from('businesses')
@@ -257,7 +328,7 @@ router.patch('/:id/status', requireAuth, requireRole(['entrepreneur', 'admin']),
       // silencioso
     }
 
-    return res.json({ order: data });
+    return res.json({ order: updatedOrder });
   } catch (err) {
     return next(err);
   }

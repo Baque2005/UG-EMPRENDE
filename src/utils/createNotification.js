@@ -29,7 +29,8 @@ export async function createNotification({ userId, title, message, meta, created
       .eq('user_id', userId)
       .maybeSingle();
 
-    const emailNotifications = settingsErr ? true : (settings?.email_notifications ?? true);
+    const suppressEmail = Boolean(meta && typeof meta === 'object' && meta.suppressEmail);
+    const emailNotifications = suppressEmail ? false : (settingsErr ? true : (settings?.email_notifications ?? true));
     const pushNotifications = settingsErr ? false : (settings?.push_notifications ?? false);
 
     if (!emailNotifications && !pushNotifications) return { ok: true, emailed: false, pushed: false };
