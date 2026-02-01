@@ -62,14 +62,110 @@ router.delete('/users/:id', requireAuth, requireRole(['admin']), async (req, res
   try {
     const { id } = req.params;
 
-    // 1) borrar profile (si existe)
+    // 0) Obtener business_id (si existe) antes de borrar perfil
+    let businessId = null;
+    try {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('business_id')
+        .eq('id', id)
+        .maybeSingle();
+
+      businessId = profile?.business_id || null;
+    } catch {
+      businessId = null;
+    }
+
+    // Fallback: si no está en profiles, intentar resolver por owner_id
+    if (!businessId) {
+      try {
+        const { data: biz } = await supabase
+          .from('businesses')
+          .select('id')
+          .eq('owner_id', id)
+          .limit(1)
+          .maybeSingle();
+        businessId = biz?.id || null;
+      } catch {
+        businessId = null;
+      }
+    }
+
+    // 1) Si el usuario tiene emprendimiento, eliminarlo primero (con dependencias)
+    if (businessId) {
+      // Orders del negocio -> order_items -> orders
+      try {
+        const { data: bizOrders, error: bizOrdersErr } = await supabase
+          .from('orders')
+          .select('id')
+          .eq('business_id', businessId);
+
+        if (!bizOrdersErr && Array.isArray(bizOrders) && bizOrders.length > 0) {
+          const ids = bizOrders.map((o) => o.id);
+          await supabase.from('order_items').delete().in('order_id', ids);
+          await supabase.from('orders').delete().in('id', ids);
+        }
+      } catch {
+        // ignore best-effort
+      }
+
+      // Productos del negocio
+      try {
+        await supabase.from('products').delete().eq('business_id', businessId);
+      } catch {
+        // ignore best-effort
+      }
+
+      // Ratings del negocio
+      try {
+        await supabase.from('business_ratings').delete().eq('business_id', businessId);
+      } catch {
+        // ignore best-effort
+      }
+
+      // Eliminar negocio
+      const { error: bizDelErr } = await supabase.from('businesses').delete().eq('id', businessId);
+      if (bizDelErr) return res.status(400).json({ error: `No se pudo eliminar el emprendimiento: ${bizDelErr.message}` });
+    }
+
+    // 2) Limpieza best-effort de datos ligados al usuario
+    try {
+      await Promise.allSettled([
+        supabase.from('notifications').delete().eq('user_id', id),
+        supabase.from('payment_methods').delete().eq('user_id', id),
+        supabase.from('delivery_addresses').delete().eq('user_id', id),
+        supabase.from('user_settings').delete().eq('user_id', id),
+        supabase.from('favorites').delete().eq('user_id', id),
+        supabase.from('push_subscriptions').delete().eq('user_id', id),
+        // Reportes donde fue quien reportó o el dueño afectado
+        supabase.from('reports').delete().or(`reporter_id.eq.${id},owner_user_id.eq.${id}`),
+        // Reportes cuyo target es el usuario
+        supabase.from('reports').delete().eq('type', 'user').eq('target_id', id),
+      ]);
+    } catch {
+      // ignore
+    }
+
+    // Orders del usuario (customer) -> order_items -> orders
+    try {
+      const { data: userOrders, error: ordersErr } = await supabase.from('orders').select('id').eq('customer_id', id);
+      if (!ordersErr && Array.isArray(userOrders) && userOrders.length > 0) {
+        const ids = userOrders.map((o) => o.id);
+        await supabase.from('order_items').delete().in('order_id', ids);
+        await supabase.from('orders').delete().in('id', ids);
+      }
+    } catch {
+      // ignore
+    }
+
+    // 3) borrar profile (si existe)
     await supabase.from('profiles').delete().eq('id', id);
 
-    // 2) borrar usuario de Supabase Auth (service role)
+    // 4) borrar usuario de Supabase Auth (service role)
     const { error: authErr } = await supabase.auth.admin.deleteUser(id);
     if (authErr) return res.status(400).json({ error: authErr.message });
 
-    return res.json({ message: 'Usuario eliminado' });
+    return res.json({ message: businessId ? 'Usuario y emprendimiento eliminados' : 'Usuario eliminado' });
   } catch (err) {
     return next(err);
   }
