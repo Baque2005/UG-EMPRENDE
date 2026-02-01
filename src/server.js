@@ -312,6 +312,87 @@ io.on('connection', (socket) => {
     })();
   });
 
+  // Realtime sync for block/mute between two users.
+  // The client triggers this after calling the REST endpoints; server verifies actual state in DB.
+  socket.on('user:relationship:refresh', async (payload) => {
+    try {
+      if (!thisUserId) return;
+      const otherUserId = String(payload?.otherUserId || '').trim();
+      if (!otherUserId) return;
+      if (otherUserId === String(thisUserId)) return;
+
+      const me = String(thisUserId);
+
+      const [blockMeToOther, blockOtherToMe, muteMeToOther, muteOtherToMe] = await Promise.all([
+        supabase
+          .from('user_blocks')
+          .select('blocker_id')
+          .match({ blocker_id: me, blocked_id: otherUserId })
+          .maybeSingle(),
+        supabase
+          .from('user_blocks')
+          .select('blocker_id')
+          .match({ blocker_id: otherUserId, blocked_id: me })
+          .maybeSingle(),
+        supabase
+          .from('user_mutes')
+          .select('muter_id')
+          .match({ muter_id: me, muted_id: otherUserId })
+          .maybeSingle(),
+        supabase
+          .from('user_mutes')
+          .select('muter_id')
+          .match({ muter_id: otherUserId, muted_id: me })
+          .maybeSingle(),
+      ]);
+
+      // If any query fails, don't spam clients with partial state.
+      if (blockMeToOther?.error || blockOtherToMe?.error || muteMeToOther?.error || muteOtherToMe?.error) return;
+
+      const evt = {
+        a: me,
+        b: otherUserId,
+        aBlocksB: Boolean(blockMeToOther?.data),
+        bBlocksA: Boolean(blockOtherToMe?.data),
+        aMutesB: Boolean(muteMeToOther?.data),
+        bMutesA: Boolean(muteOtherToMe?.data),
+        at: new Date().toISOString(),
+      };
+
+      io.to(`user:${me}`).emit('user:relationship:update', evt);
+      io.to(`user:${otherUserId}`).emit('user:relationship:update', evt);
+    } catch {
+      // ignore
+    }
+  });
+
+  // Delete/hide chat for both users (UI-level, best-effort).
+  socket.on('chat:deleteForBoth', async (payload) => {
+    try {
+      if (!thisUserId) return;
+      const raw = payload?.conversationId || payload?.orderId || null;
+      if (!raw) return;
+
+      const convoId = await resolveRoomId(raw);
+      const meta = await resolveConversationMeta(convoId);
+      const customerId = meta?.customerId || null;
+      const ownerId = meta?.businessOwnerUserId || null;
+      const participants = [customerId, ownerId].filter(Boolean).map(String);
+
+      const evt = {
+        conversationId: convoId,
+        deletedBy: String(thisUserId),
+        at: new Date().toISOString(),
+      };
+
+      // Notify both participants and anyone in the room
+      io.to(`chat:${convoId}`).emit('chat:deleted', evt);
+      for (const uid of participants) io.to(`user:${uid}`).emit('chat:deleted', evt);
+    } catch {
+      // ignore
+    }
+  });
+
   socket.on('joinOrder', async (roomId) => {
     if (!roomId) return;
     try {
