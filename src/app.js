@@ -41,6 +41,10 @@ const rawOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
 const normalize = (u) => (typeof u === 'string' ? u.replace(/\/+$/u, '') : u);
 const allowedOrigins = rawOrigins.map(normalize);
 
+// En Render, esta variable suele estar disponible y apunta al dominio público.
+const renderExternalUrl = normalize(process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || process.env.APP_URL || '');
+if (renderExternalUrl && !allowedOrigins.includes(renderExternalUrl)) allowedOrigins.push(renderExternalUrl);
+
 /* eslint-disable no-console */
 console.log('CORS_ORIGIN env:', process.env.CORS_ORIGIN);
 console.log('allowedOrigins (normalized):', allowedOrigins);
@@ -61,7 +65,10 @@ const cspImgSrc = [
   'https://i.postimg.cc',
 ];
 
-const cspConnectSrc = ["'self'", ...(supabaseUrl ? [supabaseUrl] : [])];
+// Nota: WebSocket usa ws/wss y está sujeto a connect-src.
+// "'self'" no siempre cubre wss:// para una página https:// en todos los navegadores/configs,
+// así que declaramos explícitamente los esquemas.
+const cspConnectSrc = ["'self'", 'ws:', 'wss:', ...(supabaseUrl ? [supabaseUrl] : [])];
 
 app.use(
   helmet({

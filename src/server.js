@@ -11,10 +11,17 @@ const port = Number(process.env.PORT) || 4000;
 
 const server = http.createServer(app);
 
+const normalize = (u) => (typeof u === 'string' ? u.replace(/\/+$/u, '') : u);
+
 const rawOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
   .split(',')
   .map((s) => s.trim())
-  .filter(Boolean);
+  .filter(Boolean)
+  .map(normalize);
+
+// En Render, esta variable suele estar disponible y apunta al dominio público.
+const renderExternalUrl = normalize(process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || process.env.APP_URL || '');
+if (renderExternalUrl && !rawOrigins.includes(renderExternalUrl)) rawOrigins.push(renderExternalUrl);
 
 const isDev = String(process.env.NODE_ENV || '').toLowerCase() !== 'production';
 
@@ -22,12 +29,14 @@ function isAllowedSocketOrigin(origin) {
   // Socket.IO a veces pasa origin undefined (por ejemplo, herramientas o same-origin peculiar)
   if (!origin) return isDev;
 
+  const normalizedOrigin = normalize(origin);
+
   // Allowlist explícita
-  if (rawOrigins.includes(origin)) return true;
+  if (rawOrigins.includes(normalizedOrigin)) return true;
 
   // En desarrollo: permitir localhost/127.0.0.1 en cualquier puerto
   if (isDev) {
-    return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/iu.test(String(origin));
+    return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/iu.test(String(normalizedOrigin));
   }
 
   return false;
