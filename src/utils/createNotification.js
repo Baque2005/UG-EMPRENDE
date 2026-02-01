@@ -68,6 +68,17 @@ export async function createNotification({ userId, title, message, meta, created
 
     const mailRes = await sendEmail({ to: profile.email, subject, text, html });
 
+    if (!mailRes?.ok) {
+      // eslint-disable-next-line no-console
+      console.warn('[email] send failed', {
+        userId,
+        to: profile.email,
+        subject,
+        kind,
+        error: mailRes?.error,
+      });
+    }
+
     // Send push notifications if enabled for user (best-effort)
     let pushRes = null;
     if (pushNotifications) {

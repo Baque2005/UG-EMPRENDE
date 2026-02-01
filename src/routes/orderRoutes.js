@@ -259,12 +259,70 @@ router.patch('/:id/status', requireAuth, requireRole(['entrepreneur', 'admin']),
     const prevStatus = String(order?.status || '').toLowerCase();
     const nextStatus = String(body.status || '').toLowerCase();
 
+    // Disminuir stock cuando pasa a delivered por primera vez.
+    // Nota: lo hacemos ANTES de actualizar la orden para evitar que quede entregada sin ajustar inventario.
+    // Si luego falla el update de la orden, intentamos rollback best-effort.
+    let stockAdjustments = null;
+    if (prevStatus !== 'delivered' && nextStatus === 'delivered') {
+      const { data: items, error: itemsErr } = await supabase
+        .from('order_items')
+        .select('product_id, quantity')
+        .eq('order_id', id);
+
+      if (itemsErr) return res.status(400).json({ error: itemsErr.message });
+
+      const itemRows = Array.isArray(items) ? items : [];
+      const productIds = itemRows.map((it) => it?.product_id).filter(Boolean);
+
+      if (productIds.length > 0) {
+        const { data: prods, error: prodsErr } = await supabase
+          .from('products')
+          .select('id, stock')
+          .in('id', productIds);
+
+        if (prodsErr) return res.status(400).json({ error: prodsErr.message });
+
+        const stockById = new Map((Array.isArray(prods) ? prods : []).map((p) => [String(p.id), Number(p.stock) || 0]));
+        stockAdjustments = itemRows.map((it) => {
+          const pid = String(it.product_id);
+          const currentStock = stockById.has(pid) ? stockById.get(pid) : 0;
+          const qty = Number(it.quantity) || 0;
+          const nextStock = Math.max(0, currentStock - qty);
+          return { productId: pid, prevStock: currentStock, nextStock };
+        });
+
+        // Aplicar updates (secuencial para simplificar manejo de errores)
+        for (const adj of stockAdjustments) {
+          const { error: updErr } = await supabase
+            .from('products')
+            .update({ stock: adj.nextStock })
+            .eq('id', adj.productId);
+
+          if (updErr) return res.status(400).json({ error: updErr.message });
+        }
+      }
+    }
+
     const patch = { status: body.status };
     // Guardar fecha exacta de entrega/emisión de factura cuando pasa a "delivered" por primera vez.
     // Si la columna no existe en BD aún, hacemos fallback sin romper el endpoint.
     if (prevStatus !== 'delivered' && nextStatus === 'delivered') {
       patch.delivered_at = new Date().toISOString();
     }
+
+    const rollbackStock = async () => {
+      if (!Array.isArray(stockAdjustments) || stockAdjustments.length === 0) return;
+      for (const adj of stockAdjustments) {
+        try {
+          await supabase
+            .from('products')
+            .update({ stock: adj.prevStock })
+            .eq('id', adj.productId);
+        } catch {
+          // best-effort
+        }
+      }
+    };
 
     let updatedOrder;
     {
@@ -285,9 +343,13 @@ router.patch('/:id/status', requireAuth, requireRole(['entrepreneur', 'admin']),
             .select()
             .single();
 
-          if (error2) return res.status(400).json({ error: error2.message });
+          if (error2) {
+            await rollbackStock();
+            return res.status(400).json({ error: error2.message });
+          }
           updatedOrder = data2;
         } else {
+          await rollbackStock();
           return res.status(400).json({ error: error.message });
         }
       } else {

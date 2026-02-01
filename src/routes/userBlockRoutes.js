@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middlewares/auth.js';
 import { blockUser, unblockUser, muteUser, unmuteUser } from '../userService.js';
+import { supabase } from '../config/supabase.js';
 
 const router = Router();
 
@@ -22,6 +23,39 @@ router.delete('/:id/block', requireAuth, async (req, res, next) => {
     const ok = await unblockUser(req.user.id, targetId);
     if (!ok) return res.status(400).json({ error: 'No se pudo desbloquear' });
     return res.json({ blocked: false });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// Consultar estado de bloqueo (bidireccional)
+// - blockedByMe: yo bloqueé al target
+// - blockedMe: el target me bloqueó
+router.get('/:id/block/status', requireAuth, async (req, res, next) => {
+  try {
+    const targetId = req.params.id;
+    const me = req.user.id;
+
+    if (!targetId) return res.status(400).json({ error: 'Falta id' });
+    if (!me) return res.status(401).json({ error: 'No autorizado' });
+
+    const [{ data: byMe, error: byMeErr }, { data: byOther, error: byOtherErr }] = await Promise.all([
+      supabase
+        .from('user_blocks')
+        .select('blocker_id')
+        .match({ blocker_id: me, blocked_id: targetId })
+        .maybeSingle(),
+      supabase
+        .from('user_blocks')
+        .select('blocker_id')
+        .match({ blocker_id: targetId, blocked_id: me })
+        .maybeSingle(),
+    ]);
+
+    if (byMeErr) return res.status(400).json({ error: byMeErr.message });
+    if (byOtherErr) return res.status(400).json({ error: byOtherErr.message });
+
+    return res.json({ blockedByMe: Boolean(byMe), blockedMe: Boolean(byOther) });
   } catch (err) {
     return next(err);
   }

@@ -67,6 +67,32 @@ const lastSeenByUser = new Map(); // userId -> ISO
 const privacyByUser = new Map(); // userId -> { showConnectionStatus, showReadReceipts }
 const chatEmailByUser = new Map(); // userId -> boolean
 
+async function getChatEmailPreference(userId) {
+  if (!userId) return false;
+  const key = String(userId);
+  if (chatEmailByUser.has(key)) return chatEmailByUser.get(key) === true;
+
+  // Best-effort DB fallback (requires optional column user_settings.chat_email_notifications)
+  try {
+    const { data, error } = await supabase
+      .from('user_settings')
+      .select('chat_email_notifications')
+      .eq('user_id', key)
+      .maybeSingle();
+
+    if (error) {
+      // If column doesn't exist, Supabase returns an error; keep conservative default.
+      return false;
+    }
+
+    const enabled = Boolean(data?.chat_email_notifications);
+    chatEmailByUser.set(key, enabled);
+    return enabled;
+  } catch {
+    return false;
+  }
+}
+
 // Presence watch subscriptions (best-effort, in-memory)
 // socketsWatchingUser: subjectUserId -> Set(socketId)
 const socketsWatchingUser = new Map();
@@ -268,7 +294,22 @@ io.on('connection', (socket) => {
   socket.on('chat:emailNotifications', (payload) => {
     if (!thisUserId) return;
     const enabled = Boolean(payload?.enabled);
-    chatEmailByUser.set(thisUserId, enabled);
+    chatEmailByUser.set(String(thisUserId), enabled);
+
+    // Best-effort persist to DB (only works if the optional column exists)
+    void (async () => {
+      try {
+        await supabase
+          .from('user_settings')
+          .upsert({
+            user_id: thisUserId,
+            chat_email_notifications: enabled,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'user_id' });
+      } catch {
+        // ignore
+      }
+    })();
   });
 
   socket.on('joinOrder', async (roomId) => {
@@ -443,7 +484,7 @@ io.on('connection', (socket) => {
           if (recipientUserId) {
             const rawText = String(msg?.text || '');
             const preview = rawText.startsWith('__img__:') ? '📷 Imagen' : rawText.slice(0, 120);
-            const chatEmailEnabled = chatEmailByUser.get(recipientUserId) === true;
+            const chatEmailEnabled = await getChatEmailPreference(String(recipientUserId));
             await createNotification({
               userId: recipientUserId,
               title: 'Nuevo mensaje',
