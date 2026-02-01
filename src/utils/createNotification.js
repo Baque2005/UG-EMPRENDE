@@ -30,7 +30,22 @@ export async function createNotification({ userId, title, message, meta, created
       .maybeSingle();
 
     const suppressEmail = Boolean(meta && typeof meta === 'object' && meta.suppressEmail);
-    const emailNotifications = suppressEmail ? false : (settingsErr ? true : (settings?.email_notifications ?? true));
+
+    const kind = String(meta && typeof meta === 'object' ? (meta.kind || '') : '').toLowerCase();
+    const isChat = kind === 'chat';
+
+    // Chat email independiente del email global del perfil.
+    // - Si meta.chatEmailEnabled está en false/undefined => NO mandar correo de chat.
+    // - Si está en true => mandar correo de chat (aunque email_notifications global sea false).
+    const metaChatEmailEnabled = Boolean(meta && typeof meta === 'object' && meta.chatEmailEnabled);
+
+    // Conservador: si no podemos leer settings, NO enviar correo por defecto.
+    // Evita spam por errores transitorios o mala configuración.
+    const emailNotifications = suppressEmail
+      ? false
+      : (isChat
+        ? metaChatEmailEnabled
+        : (settingsErr ? false : (settings?.email_notifications ?? true)));
     const pushNotifications = settingsErr ? false : (settings?.push_notifications ?? false);
 
     if (!emailNotifications && !pushNotifications) return { ok: true, emailed: false, pushed: false };

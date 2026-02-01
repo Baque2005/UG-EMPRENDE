@@ -76,6 +76,11 @@ router.post('/previews', requireAuth, async (req, res) => {
 router.get('/:chatId/messages', requireAuth, async (req, res) => {
   const { chatId } = req.params;
   try {
+    // Chat debe ser siempre fresh: evita ETag/304 que rompen clientes que esperan JSON.
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+
     await ensureChatAccess(req, chatId);
     const msgs = await getMessages(chatId, req.user.id);
     return res.json({ messages: msgs });

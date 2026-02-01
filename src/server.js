@@ -16,10 +16,35 @@ const rawOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
   .map((s) => s.trim())
   .filter(Boolean);
 
+const isDev = String(process.env.NODE_ENV || '').toLowerCase() !== 'production';
+
+function isAllowedSocketOrigin(origin) {
+  // Socket.IO a veces pasa origin undefined (por ejemplo, herramientas o same-origin peculiar)
+  if (!origin) return isDev;
+
+  // Allowlist explícita
+  if (rawOrigins.includes(origin)) return true;
+
+  // En desarrollo: permitir localhost/127.0.0.1 en cualquier puerto
+  if (isDev) {
+    return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/iu.test(String(origin));
+  }
+
+  return false;
+}
+
 const io = new Server(server, {
   cors: {
-    origin: rawOrigins,
+    origin: (origin, callback) => {
+      try {
+        if (isAllowedSocketOrigin(origin)) return callback(null, true);
+        return callback(new Error(`Socket.IO CORS bloqueado para origin: ${origin}`));
+      } catch (e) {
+        return callback(e);
+      }
+    },
     methods: ['GET', 'POST'],
+    credentials: true,
   },
 });
 
@@ -346,73 +371,103 @@ io.on('connection', (socket) => {
 
       const outgoing = msg ? { ...msg, clientId: payload?.clientId || null } : null;
 
-      // Crear notificación de "nuevo mensaje" al destinatario (best-effort)
-      try {
-        const meta = await resolveConversationMeta(convoId);
-        const sender = msg?.sender_id || payload.senderId || thisUserId || null;
-        const customerId = meta?.customerId || null;
-        const ownerId = meta?.businessOwnerUserId || null;
-
-        const recipientUserId = (() => {
-          if (!sender) return null;
-          if (sender && customerId && sender === customerId) return ownerId;
-          if (sender && ownerId && sender === ownerId) return customerId;
-          return null;
-        })();
-
-        if (recipientUserId) {
-          const rawText = String(msg?.text || '');
-          const preview = rawText.startsWith('__img__:') ? '📷 Imagen' : rawText.slice(0, 120);
-          const chatEmailEnabled = chatEmailByUser.get(recipientUserId) === true;
-          await createNotification({
-            userId: recipientUserId,
-            title: 'Nuevo mensaje',
-            message: preview,
-            meta: {
-              kind: 'chat',
-              conversationId: convoId,
-              url: `/chat?conversationId=${encodeURIComponent(convoId)}`,
-              suppressEmail: !chatEmailEnabled,
-            },
-          });
-
-          // Enviar preview en tiempo real para actualizar el sidebar sin refrescar.
-          io.to(`user:${recipientUserId}`).emit('chat:preview', {
-            conversationId: convoId,
-            text: msg?.text || '',
-            senderId: sender,
-            createdAt: msg?.created_at || null,
-          });
-        }
-
-        // También al propio sender (multi-dispositivo y para actualizar sidebar si no está en la sala)
-        if (sender) {
-          io.to(`user:${sender}`).emit('chat:preview', {
-            conversationId: convoId,
-            text: msg?.text || '',
-            senderId: sender,
-            createdAt: msg?.created_at || null,
-          });
-        }
-      } catch {
-        // ignore
-      }
-
-      // Deliver message only to sockets whose user has NOT blocked the sender
-      const sockets = await io.in(`chat:${convoId}`).fetchSockets();
-      for (const s of sockets) {
+      // Deliver message ASAP (reduce perceived latency)
+      if (outgoing) {
         try {
-          const destUserId = s.handshake.query?.userId || null;
-          if (destUserId) {
-            const blocked = await isBlockedBy(destUserId, outgoing?.sender_id || msg?.sender_id);
-            if (blocked) continue; // skip delivery
+          const sender = String(outgoing?.sender_id || msg?.sender_id || payload?.senderId || thisUserId || '');
+          const sockets = await io.in(`chat:${convoId}`).fetchSockets();
+
+          // Batch blocked checks in 1 query (instead of per-socket awaits)
+          const destUserIds = Array.from(new Set(
+            sockets
+              .map((s) => String(s.handshake.query?.userId || '').trim())
+              .filter(Boolean)
+              .filter((uid) => (sender ? uid !== sender : true)),
+          ));
+
+          let blockedSet = new Set();
+          if (sender && destUserIds.length > 0) {
+            try {
+              const { data: blocks, error: blocksErr } = await supabase
+                .from('user_blocks')
+                .select('blocker_id')
+                .eq('blocked_id', sender)
+                .in('blocker_id', destUserIds);
+              if (!blocksErr && Array.isArray(blocks)) {
+                blockedSet = new Set(blocks.map((b) => String(b?.blocker_id || '')).filter(Boolean));
+              }
+            } catch {
+              blockedSet = new Set();
+            }
           }
-          if (outgoing) s.emit('message', outgoing);
-        } catch (e) {
-          // eslint-disable-next-line no-console
-          console.error('Error delivering to socket', e);
+
+          for (const s of sockets) {
+            try {
+              const destUserId = String(s.handshake.query?.userId || '').trim();
+              if (sender && destUserId && destUserId !== sender && blockedSet.has(destUserId)) continue;
+              s.emit('message', outgoing);
+            } catch (e) {
+              // eslint-disable-next-line no-console
+              console.error('Error delivering to socket', e);
+            }
+          }
+        } catch {
+          // ignore
         }
       }
+
+      // Notificaciones + preview en background (no bloquea la entrega del mensaje)
+      void (async () => {
+        try {
+          const meta = await resolveConversationMeta(convoId);
+          const sender = msg?.sender_id || payload.senderId || thisUserId || null;
+          const customerId = meta?.customerId || null;
+          const ownerId = meta?.businessOwnerUserId || null;
+
+          const recipientUserId = (() => {
+            if (!sender) return null;
+            if (sender && customerId && sender === customerId) return ownerId;
+            if (sender && ownerId && sender === ownerId) return customerId;
+            return null;
+          })();
+
+          if (recipientUserId) {
+            const rawText = String(msg?.text || '');
+            const preview = rawText.startsWith('__img__:') ? '📷 Imagen' : rawText.slice(0, 120);
+            const chatEmailEnabled = chatEmailByUser.get(recipientUserId) === true;
+            await createNotification({
+              userId: recipientUserId,
+              title: 'Nuevo mensaje',
+              message: preview,
+              meta: {
+                kind: 'chat',
+                conversationId: convoId,
+                url: `/chat?conversationId=${encodeURIComponent(convoId)}`,
+                chatEmailEnabled,
+                suppressEmail: !chatEmailEnabled,
+              },
+            });
+
+            io.to(`user:${recipientUserId}`).emit('chat:preview', {
+              conversationId: convoId,
+              text: msg?.text || '',
+              senderId: sender,
+              createdAt: msg?.created_at || null,
+            });
+          }
+
+          if (sender) {
+            io.to(`user:${sender}`).emit('chat:preview', {
+              conversationId: convoId,
+              text: msg?.text || '',
+              senderId: sender,
+              createdAt: msg?.created_at || null,
+            });
+          }
+        } catch {
+          // ignore
+        }
+      })();
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('Error saving message (socket):', err);
