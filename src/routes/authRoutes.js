@@ -54,13 +54,20 @@ router.post('/register', async (req, res, next) => {
 
     // 1) Crear usuario en Supabase Auth (Supabase enviará el email de confirmación si está habilitado)
 
-    const { data: authData, error: authError } = await supabaseAuth.auth.signUp(
-      {
-        email: body.email,
-        password: body.password,
-      },
-      process.env.SUPABASE_EMAIL_REDIRECT ? { emailRedirectTo: process.env.SUPABASE_EMAIL_REDIRECT } : undefined,
-    );
+    const redirectTo = process.env.SUPABASE_EMAIL_REDIRECT;
+    const signUpPayload = {
+      email: body.email,
+      password: body.password,
+      ...(redirectTo ? { options: { emailRedirectTo: redirectTo } } : {}),
+    };
+
+    // Supabase puede responder 502/503/504 si el proyecto está "cold" o temporalmente saturado.
+    // Hacemos 1 reintento corto para mejorar UX sin duplicar lógica.
+    let { data: authData, error: authError } = await supabaseAuth.auth.signUp(signUpPayload);
+    if (authError && [502, 503, 504].includes(Number(authError.status))) {
+      await new Promise((r) => setTimeout(r, 900));
+      ({ data: authData, error: authError } = await supabaseAuth.auth.signUp(signUpPayload));
+    }
 
     // LOG TEMPORAL: imprimir resultado de signUp
     console.log('=== [REGISTER] Resultado signUp ===');
@@ -76,7 +83,17 @@ router.post('/register', async (req, res, next) => {
           code: 'user_already_registered',
         });
       }
-      return res.status(400).json({ error: authError.message });
+
+      const status = Number(authError.status) || 400;
+      if ([502, 503, 504].includes(status)) {
+        return res.status(504).json({
+          error:
+            'Supabase (Auth) tardó demasiado en responder. Intenta nuevamente en unos segundos. Si persiste, revisa el estado del proyecto en Supabase.',
+          code: 'supabase_auth_timeout',
+        });
+      }
+
+      return res.status(400).json({ error: authError.message || 'Error al registrar' });
     }
     if (!authData?.user) return res.status(500).json({ error: 'No se pudo crear el usuario' });
 
@@ -130,7 +147,18 @@ router.post('/login', async (req, res, next) => {
       password: body.password,
     });
 
-    if (error) return res.status(401).json({ error: error.message });
+    if (error) {
+      const msg = String(error.message || '').toLowerCase();
+      if (msg.includes('email not confirmed') || msg.includes('email_not_confirmed')) {
+        return res.status(403).json({
+          error:
+            'Tu correo aún no está verificado. Revisa tu bandeja de entrada y también Spam/Promociones.\nSi no encuentras el correo, usa "Reenviar correo de confirmación" e inténtalo nuevamente en 1-2 minutos.',
+          code: 'email_not_confirmed',
+        });
+      }
+
+      return res.status(401).json({ error: error.message });
+    }
 
     const token = data.session?.access_token;
     const user = data.user;

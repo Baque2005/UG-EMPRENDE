@@ -29,8 +29,15 @@ const app = express();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // Servir archivos estáticos del frontend (build Vite en backend/dist)
+// IMPORTANTE: en desarrollo esto suele estar desactualizado; preferimos usar Vite dev server (5173).
 const staticPath = path.join(__dirname, '..', 'dist');
-app.use(express.static(staticPath));
+const shouldServeStatic =
+  String(process.env.SERVE_STATIC || '').toLowerCase() === 'true' ||
+  String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+
+if (shouldServeStatic) {
+  app.use(express.static(staticPath));
+}
 
 // Leer orígenes desde env y normalizar (quitar slash final)
 const rawOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
@@ -136,6 +143,7 @@ app.use('/api/users', userBlockRoutes);
 app.use((req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   if (req.method !== 'GET') return next();
+  if (!shouldServeStatic) return next();
   const indexFile = path.join(staticPath, 'index.html');
   return res.sendFile(indexFile, (err) => {
     if (err) return next(err);
