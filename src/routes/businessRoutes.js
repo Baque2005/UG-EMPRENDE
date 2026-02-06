@@ -428,4 +428,74 @@ router.delete('/:id', requireAuth, requireRole(['admin']), async (req, res, next
   }
 });
 
+// Convert current entrepreneur -> customer: remove their business and downgrade role
+router.post('/me/convert-to-customer', requireAuth, requireRole(['entrepreneur']), async (req, res, next) => {
+  try {
+    // Find business owned by current user
+    const { data: biz, error: bizErr } = await supabase
+      .from('businesses')
+      .select('id')
+      .eq('owner_id', req.user.id)
+      .limit(1)
+      .maybeSingle();
+
+    if (bizErr) return res.status(400).json({ error: bizErr.message });
+    if (!biz || !biz.id) {
+      // No business: still allow role change
+      await supabase.from('profiles').update({ role: 'customer', business_id: null }).eq('id', req.user.id);
+      return res.json({ message: 'Ya no eres emprendedor', downgraded: true });
+    }
+
+    const id = biz.id;
+
+    // 1) Eliminar órdenes del negocio (y sus items)
+    try {
+      const { data: bizOrders } = await supabase.from('orders').select('id').eq('business_id', id);
+      if (Array.isArray(bizOrders) && bizOrders.length > 0) {
+        const ids = bizOrders.map((o) => o.id);
+        await supabase.from('order_items').delete().in('order_id', ids);
+        await supabase.from('orders').delete().in('id', ids);
+      }
+    } catch {}
+
+    // 2) Eliminar productos del negocio
+    try {
+      await supabase.from('products').delete().eq('business_id', id);
+    } catch {}
+
+    // 3) Eliminar calificaciones del negocio
+    try {
+      await supabase.from('business_ratings').delete().eq('business_id', id);
+    } catch {}
+
+    // 4) Desvincular perfiles que apunten a este negocio
+    try {
+      await supabase.from('profiles').update({ business_id: null }).eq('business_id', id);
+    } catch {}
+
+    // 5) Finalmente borrar el negocio
+    try {
+      await supabase.from('businesses').delete().eq('id', id);
+    } catch (e) {
+      // best-effort
+    }
+
+    // 6) Downgrade del rol del usuario que pidió la conversión
+    await supabase.from('profiles').update({ role: 'customer', business_id: null }).eq('id', req.user.id);
+
+    // Notificar administradores
+    try {
+      await notifyAdmins({
+        title: 'Negocio eliminado por su dueño',
+        message: `El usuario ${req.user.email || req.user.id} convirtió su cuenta a cliente y su negocio fue eliminado.`,
+        meta: { kind: 'business', action: 'owner_deleted', ownerUserId: req.user.id },
+      });
+    } catch {}
+
+    return res.json({ message: 'Negocio eliminado y rol convertido a cliente', downgraded: true });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 export default router;
